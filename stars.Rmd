@@ -1,0 +1,421 @@
+---
+title: "Analyzing and visualising spatial and spatiotemporal data cubes - Part I"
+author: "Edzer Pebesma"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    toc_depth: 3
+bibliography: useR19_I.bib
+link-citations: yes
+---
+
+### Copyright
+
+All the material presented here, to the extent it is original, is available under [CC-BY-SA](https://creativecommons.org/licenses/by-sa/2.0/).
+
+Source files (.Rmd) are found here: https://github.com/edzer/UseR2020
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Exercises
+
+For the exercises it is best to install a fresh copy of `stars`, using
+```{r eval=FALSE}
+if (!require(remotes))
+  install.packages("remotes")
+remotes::install_github("r-spatial/stars")
+```
+
+and to install `starsdata`, which is about 1 Gb in size (don't forget to remove afterwards):
+```{r eval=FALSE}
+install.packages("starsdata", repos = "https://gis-bigdata.uni-muenster.de/pebesma", type = "source")
+```
+
+## What are data cubes?
+
+* what are data cubes? examples?
+* what defines data cubes?
+* are datacubes three-dimensional?
+* are tables (e.g. `data.frame`s) data cubes?
+* is a raster dataset (e.g. a `RasterLayer`, or single-band GeoTIFF) a data cube?
+* what defines a dimension of a data cube?
+
+
+```{r}
+library(stars)
+```
+
+## Vector data cube: panel data
+
+Panel data are time series data collected for a set of subjects (persons, companies, countries etc). That makes them (i) multidimensional, and (ii) spatiotemporal, since the subjects are typically spatial entities (though they might move).
+
+```{r}
+library(ggplot2)
+data(Produc, package = "plm")
+head(Produc)
+ggplot(Produc) + geom_raster(aes(y = state, x = year, fill = pcap))
+```
+
+this plot shows the raw `pcap` (public capital stock) values, which mainly demonstrates
+that large states are large. Normalizing them by dividing through the temporal means, we
+see more structure:
+
+```{r}
+(s = st_as_stars(Produc, y_decreasing = FALSE))
+s = st_apply(s, 1, function(x) x/mean(x)) %>%
+  st_set_dimensions(names = c("year", "state"))
+s
+pr = as.data.frame(s)
+head(pr)
+ggplot(pr) + geom_raster(aes(y = state, x = year, fill = pcap))
+```
+
+## Vector data cube: North Carolina SIDS
+
+The North Carolina SIDS (sudden infant
+death syndrome) data set, introduced
+[here](https://r-spatial.github.io/spdep/articles/sids.html),
+is an epidemiological data set containing population (births,
+`BIR`), disease cases (`SID`), and non-white births (`NWBIR`)
+for two periods, indicated by the start years 1974 and 1979.
+The population and time information is spread over columns in
+a `data.frame`:
+
+```{r}
+nc = read_sf(system.file("gpkg/nc.gpkg", package="sf"))
+nc.df = st_set_geometry(nc, NULL) # m is a regular, non-spatial data.frame
+head(nc.df)
+```
+
+We now mold this table into a 100 (counties) x 3 (categories) x 2 (years) array: 
+```{r}
+mat = as.matrix(nc.df[c("BIR74", "SID74", "NWBIR74", "BIR79", "SID79", "NWBIR79")])
+dim(mat) = c(county = 100, var = 3, year = 2) # make it a 3-dimensional array
+# set dimension values to the array:
+dimnames(mat) = list(county = nc$NAME, var = c("BIR", "SID", "NWBIR"), year = c(1974, 1979))
+# convert array into a stars object
+(nc.st = st_as_stars(pop = mat))
+```
+
+after which we can replace the county names with the county geometries:
+```{r}
+(nc.geom <- st_set_dimensions(nc.st, 1, st_geometry(nc)))
+```
+
+Note that we have now two fields filled for the `sfc` (simple feature geometry) dimension: `refsys` and `points`. What do they mean?
+
+We can compute and plot the sums over the years for each county (1) and variable (2): 
+
+```{r}
+plot(st_apply(nc.geom, c(1,2), sum), key.pos = 4) # sum population over year
+```
+
+In order to meaningfully compare disease cases, we standardise incidence rates (SIR), by
+
+$$\mbox{SIR}_i=\frac{c_i/p_i}{\sum_i c_i / \sum_i p_i}$$
+
+with $c_i$ the incidences and $p_i$ the corresponding population of county $i$.
+For SIR, the value one indicates equality to the mean incidence rate.
+We first compute the global incidence $m$:
+```{r}
+# split out BIR, SID, NWBIR over attributes:
+split(nc.geom, 2) 
+# sum by category:
+(nc.sum = sapply(split(nc.geom, 2), sum)) 
+# denominator: mean incidence ratio, averaged over county & years:
+(IR = nc.sum[2]/nc.sum[1]) 
+# standardise each year/counte value by dividing over IR:
+nc.SIR = st_apply(nc.geom, c(1,3), function(x) (x[2]/x[1])/IR)
+plot(nc.SIR, breaks = c(0,.25,.5,.75,.9,1.1,1.5,2.5,3.5,5), 
+  pal = rev(RColorBrewer::brewer.pal(9, "RdBu")))
+```
+
+```{r}
+#library(mapview)
+#mapview(breweries)
+```
+
+## Vector data cube with two space dimensions: OD matrices
+
+See section 4.3.2 [here](https://keen-swartz-3146c4.netlify.app/raster.html#datacubes).
+
+## Vector data cubes: why?
+
+Why don't we work on regular `data.frame` or `tbl_df` tables?
+
+* with arrays, it is immediately clear where the missing values are; with tables the "empty" records 
+may be omitted (and not `NA` or 0 filled)
+* with tables, you may have duplicate records; no such thing with arrays
+* with tables, order of records is not given a priori; with arrays lookup is much faster, as each dimensions gives an _index_
+* with arrays you can directly operate over a dimension, or reduce it (e.g. taking the time mean); with tables this is much harder.
+* vector data cubes arise naturally when sampling raster data cubes (up next), or aggregating raster data cubes over polygons
+
+Why not?
+
+* tables may be more efficient, memory-wise, if an array is very sparse (many `NA` or 0 values)
+* rather than be smart, use raw power (Google Big Query GIS; look how Carto analyses raster as vector data)
+
+## Raster data cubes: raster layer
+
+```{r}
+(g = read_stars(system.file("external/test.grd", package = "raster")))
+plot(g, col = viridis::viridis(11), breaks = "equal")
+```
+
+Note that:
+
+* raster files are data cubes: the attribute has values for _all combinations of_ a set of x and y values
+* where vector data cubes have x/y space features in a _single_ dimension, raster data cubes spread x and y over _two_ (x-y raster cells) or _three separate_ (x-y-z voxels) dimensions.
+* this particular example is a _regular_ grid: `offset` and `delta` are filled, and geographic coordinates can be computed, e.g. for the x dimension, from 1-based cell index $i$ by $$x_i = \mbox{offset}_x + (i-1) * \mbox{delta}_x$$
+* this way, index 1 gives the _edge_, and 1.5 the _center_ of the first grid cell.
+* `delta` for `y` is typically negative: going south row indexes increase while y coordinates decrease
+* the dimensions have a `refsys` (here: a deprecated Proj4 string), allowing a match to other world coordinates (e.g. plotting with leaflet/mapview)
+* what you _see_ are the non-NA cells, the NA cells are not drawn, but they are there; we can show them by converting to features, drawing cell borders grey: 
+
+```{r}
+(g.sf = st_as_sf(g, na.rm = FALSE))
+plot(g.sf, border = 'grey', pal = viridis::viridis(9), nbreaks = 10)
+```
+
+## Raster data cubes: multiple layers
+
+A lot of raster information comes as multi-layer, the simplest being rgb images:
+```{r}
+(r = read_stars(system.file("pictures/Rlogo.jpg", package = "rgdal"))) # the old one
+plot(r, breaks = "equal")
+```
+
+Obviously, such data can be plotted as colors; we will first _convert_ the rgb values to R color values:
+```{r}
+(r.rgb = st_rgb(r))
+r.rgb[[1]][1:3,1]
+```
+
+before plotting it:
+```
+plot(r.rgb)
+```
+
+Multi-band data is much more common and goes beyond rgb; an exerpt
+with the 30m bands of a Landsat-7 image is found here:
+
+```{r}
+L7file = system.file("tif/L7_ETMs.tif", package = "stars")
+(L7 = read_stars(L7file))
+```
+
+Plotting this uses _histogram stretching_ over all bands.
+I think of histogram stretching as [HDR](https://en.wikipedia.org/wiki/High-dynamic-range_imaging) in monochrome attribute space: each grey tone covers the same area, color breaks are quantiles of the map
+layer:
+
+```{r}
+plot(L7)
+```
+
+We can also do the stretching over each band individually, meaning there is no common key:
+
+```{r}
+plot(L7, join_zlim = FALSE)
+```
+
+From these bands we can also make color or false color composites:
+
+```{r}
+par(mfrow = c(1, 2))
+plot(L7, rgb = c(3,2,1), reset = FALSE, main = "RGB")    # rgb
+plot(L7, rgb = c(4,3,2), main = "False color (NIR-R-G)") # false color
+```
+
+## Transforming and warping rasters
+
+Suppose we create a 1-degree grid over parts of Europe:
+```{r}
+bb = st_bbox(c(xmin = -10, xmax = 20, ymin = 40, ymax = 60), crs = 4326)
+(x = st_as_stars(bb, dx = 1, dy = 1))
+```
+
+We can plot the grid outline e.g. by:
+```{r}
+#sf_use_s2(FALSE)
+library(rnaturalearth)
+ne <- ne_countries(returnclass = "sf", continent = 'europe') %>%
+	st_set_precision(1e8)
+ne$pop_dens = units::set_units(ne$pop_est / st_area(ne), 1/(km^2))
+plot(ne["pop_dens"], reset = FALSE, extent = bb)
+pop = st_rasterize(ne["pop_dens"], x)
+plot(st_as_sf(pop, na.rm = FALSE), add = TRUE, border = 'grey')
+```
+
+We can transform this grid e.g. to the ETRS89 / LAEA projection:
+```{r}
+(pop.3035 = st_transform(pop, 3035))
+ne.3035 = st_transform(ne, 3035)
+plot(pop.3035, border = 'grey', reset = FALSE)
+plot(st_geometry(ne.3035), add = TRUE, border = 'yellow')
+```
+
+Note that the transformed grid is no longer a regular grid (it does not have `offset` and `delta` values for `x` and `y`), but a curvilinear grid: for every grid cell the longitude/latitude pair is stored. All
+the grid cell values are exactly retained, their geometry only changed reference system!
+
+If we need to work this curvilinear grid to a regular grid in the
+new reference system, we can either _warp_ it:
+
+```{r}
+target_grid = st_as_stars(st_bbox(pop.3035)) # add dimensions/cell sizes etc here
+(w = st_warp(pop, target_grid)) # or give only a target crs
+plot(w, border = 'grey', reset = FALSE)
+plot(st_geometry(ne.3035), add = TRUE, border = 'yellow')
+```
+
+Suppose we had worked with population rather than population _density_, this warping would have caused a shift in total population; another approach would have been to use `sf::st_interpolate_aw` for area-weighted interpolation for this.
+
+
+## Raster data cubes: time and multiple attributes
+
+A lot of Earth observation and modelling data from domains such as
+weather, climate, hydrology, oceanography come with a time dimension.
+Quite commonly, data cubes are stored in NetCDF (or HDF4, HDF5) formats.
+We have two examples; the first is a time series with two attributes,
+concerning monthly total precipitation, downscaled from CMIP:
+
+```{r}
+(w <- system.file("nc/bcsd_obs_1999.nc", package = "stars") %>%
+    read_stars("data/full_data_daily_2013.nc"))
+plot(w)
+```
+
+The second concerns a time series split over multiple files,
+```{r}
+x = c(
+"avhrr-only-v2.19810901.nc",
+"avhrr-only-v2.19810902.nc",
+"avhrr-only-v2.19810903.nc",
+"avhrr-only-v2.19810904.nc",
+"avhrr-only-v2.19810905.nc",
+"avhrr-only-v2.19810906.nc",
+"avhrr-only-v2.19810907.nc",
+"avhrr-only-v2.19810908.nc",
+"avhrr-only-v2.19810909.nc"
+)
+# see the second vignette:
+# install.packages("starsdata", repos = "http://gis-bigdata.uni-muenster.de", type = "source")
+file_list = system.file(paste0("netcdf/", x), package = "starsdata")
+(y = read_stars(file_list, quiet = TRUE))
+```
+This variable contains a singular dimension, `zlev`, which we can remove using `adrop`:
+```{r}
+(z = adrop(y))
+```
+
+which we can for instance plot with ggplot:
+```{r}
+library(ggplot2)
+library(viridis)
+## Loading required package: viridisLite
+library(ggthemes)
+ggplot() +
+  geom_stars(data = z[1], alpha = 0.8, downsample = c(10, 10, 1)) +
+  facet_wrap("time") +
+  scale_fill_viridis() +
+  coord_equal() +
+  theme_map() +
+  theme(legend.position = "bottom") +
+  theme(legend.key.width = unit(2, "cm"))
+```
+
+A more challenging example involving Landsat 8 imagery is shown at the end of this tutorial.
+
+## Other operations on data cubes
+
+#### subsetting
+
+Subsetting is done using `[`, where the first argument concerns
+attributes, the others subsequent dimensions.
+
+```{r}
+y[2] # second attribute
+y[,1:10,1:12] # x/y region
+y[,,,1] # zlev
+y[,,,,3:5] # time
+```
+
+Subsetting can also be used to shortcut intersections, as in
+```{r eval=FALSE}
+x = st_as_stars() # global, 1 degree grid
+plot([ne])
+```
+where the area intersecting with `ne` is selected (masked / cropped); note that
+`ne` crosses the dateline, and a southern country is included.
+
+
+
+#### cropping
+
+`st_crop` crops a raster, possibly masking (NA-ing) cells outside a given polygonal area.
+
+#### tidy verbs
+
+Tidyverse verbs are partly supported by `stars`, see [this vignette](https://r-spatial.github.io/stars/articles/stars3.html):
+
+|command | meaning                                           |
+|:-------|:--------------------------------------------------|
+|`slice` | select dimension values using index               |
+|`filter`| select dimension values using dimension values    |
+|`pull`  | pull out an attribute                             |
+|`select`| select one or more attributes                     |
+|`mutate`| create new attributes based on existing ones      |
+
+
+#### aggregating, extracting
+
+`stars` has an `aggregate` method that lets you do spatial or
+temporal aggregations of `stars` objects, such as averaging over
+a set of polygons.
+
+`st_extract` extracts pixel values at a set of given `POINT`
+locations.
+
+## From raster to vector, vector to raster
+
+We saw an example of `st_rasterize` above, which rasterizes polygon data to `stars` rasters. `st_as_sf` does the reverse. `st_as_sf` can create points for raster cells, or square polygons, or join raster cells with identical cell values ("polygonize").
+
+## Proxy objects, lazy reading and computing
+
+When opening a very large dataset, it is not being read entirely in memory, but rather a handle to the file, along with the dimension metadata is returned. Suppose we want to read the four 10m bands in a Sentinel-2 tile, provided by package `starsdata`:
+
+```{r}
+granule = system.file("sentinel/S2A_MSIL1C_20180220T105051_N0206_R051_T32ULE_20180221T134037.zip", 
+  package = "starsdata")
+s2 = paste0("SENTINEL2_L1C:/vsizip/", granule, 
+  "/S2A_MSIL1C_20180220T105051_N0206_R051_T32ULE_20180221T134037.SAFE/MTD_MSIL1C.xml:10m:EPSG_32632")
+(p = read_stars(s2))
+```
+
+We can control whether a `stars_proxy` object is returned by setting e.g. `proxy = TRUE`; the current default is to return proxy objects when the number of cells is larger than $10^8$.
+
+Operations on proxy objects are **lazy**, that means that reading data and computing are postponed to the moment grid cells are needed (i.e. to plot, to write, or convert to `stars`). For instance in the following sequence,
+
+```{r}
+ndvi = function(x) (x[4]-x[1])/(x[4]+x[1])
+(p.ndvi = st_apply(p, c("x", "y"), ndvi)) # doesn't actually do anything, yet
+plot(p.ndvi)
+```
+
+the actual order of operations that is carried out is:
+
+* when `plot(p.ndvi)` is called, nothing has been computed yet
+* `plot.stars_proxy` evaluates what needs to be done: 
+    * since many more pixels are present in the image then there are available on the plotting device, and since `ndvi` is applied pixel-wise, it can downsample (read at lower resolution) _before_ applying `nvdvi`
+    * it then reads the pixels at screen resolution
+	* it computes ndvi for the pixels read
+	* it plots them
+* this leads to a speed-up from 10 minutes (for all available pixels) to a few seconds (for visible pixels), in particular for data formats that carry overviews ([image pyramid](https://en.wikipedia.org/wiki/Pyramid_(image_processing))).
+
+This processing pattern is familiar to those who have worked with e.g. Google Earth Engine.
+
