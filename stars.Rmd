@@ -76,6 +76,26 @@ head(pr)
 ggplot(pr) + geom_raster(aes(y = state, x = year, fill = pcap))
 ```
 
+We can also match the state names to state geometries:
+```{r}
+library(maps) 
+states.m = map('state', plot=FALSE, fill=TRUE)
+#IDs <- sapply(strsplit(states.m$names, ":"), function(x) x[1])
+st = st_as_sf(states.m)[-8,] # deselect D.C., not in Produc
+match(tolower(st_get_dimension_values(s, "state")), sub(" ", "_", st$ID))
+```
+this indicates that we do not have to reorder the states... then we can simply set them:
+```{r}
+(s_sf = st_set_dimensions(s, "state", values = st_geometry(st)))
+# plot a single time slice:
+(s_sf_y1 = s_sf[,1])
+# drop the obsolete dimension:
+(s_sf_y1 = adrop(s_sf_y1))
+# convert to sf:
+sf = st_as_sf(s_sf_y1)
+plot(sf)
+```
+
 ## Vector data cube: North Carolina SIDS
 
 The North Carolina SIDS (sudden infant
